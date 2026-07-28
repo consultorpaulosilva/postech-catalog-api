@@ -26,7 +26,9 @@ builder.Host.UseSerilog((context, services, options) =>
 #region [Builder Extensions]
 
 builder.Services.AddApplicationServices();
+builder.Services.AddHealthChecks();
 builder.Services.AddInfrastructure(builder.Configuration);
+builder.Services.AddSearchEngine(builder.Configuration);
 
 builder.Services.AddMassTransitServices(builder.Configuration);
 builder.Services.AddJwtAuthentication(builder.Configuration);
@@ -35,6 +37,14 @@ builder.Services.AddOpenApiWithAuth();
 #endregion
 
 var app = builder.Build();
+
+// Sondas do Kubernetes.
+//  live  -> o processo esta vivo; se falhar, o pod e reiniciado.
+//  ready -> o pod pode receber trafego; enquanto retorna 503 o Service
+//           nao o inclui no balanceamento, o que evita 502 durante o
+//           rolling update enquanto a aplicacao ainda esta subindo.
+app.MapHealthChecks("/health/live").AllowAnonymous();
+app.MapHealthChecks("/health/ready").AllowAnonymous();
 
 #region [App Extensions]
 

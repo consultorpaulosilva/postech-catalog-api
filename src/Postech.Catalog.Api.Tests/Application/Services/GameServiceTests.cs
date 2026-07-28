@@ -9,6 +9,7 @@ using Postech.Catalog.Api.Domain.Entities;
 using Postech.Catalog.Api.Domain.Errors;
 using Postech.Catalog.Api.Infrastructure.Messaging;
 using Postech.Catalog.Api.Infrastructure.Repositories;
+using Postech.Catalog.Api.Infrastructure.Search;
 
 namespace Postech.Catalog.Api.Tests.Application.Services;
 
@@ -16,6 +17,7 @@ public class GameServiceTests
 {
     private readonly IGameRepository _gameRepository = Substitute.For<IGameRepository>();
     private readonly IEventPublisher _eventPublisher = Substitute.For<IEventPublisher>();
+    private readonly IGameSearchIndex _searchIndex = Substitute.For<IGameSearchIndex>();
     private readonly IDistributedCache _cache;
     private readonly ILogger<GameService> _logger = Substitute.For<ILogger<GameService>>();
 
@@ -25,7 +27,8 @@ public class GameServiceTests
         _cache.GetAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
     }
 
-    private GameService GetGameService() => new GameService(_gameRepository, _eventPublisher, _cache, _logger);
+    private GameService GetGameService() =>
+        new GameService(_gameRepository, _eventPublisher, _cache, _searchIndex, _logger);
 
     [Fact]
     public async Task GetAllGamesAsync_ShouldReturnAllGames()
