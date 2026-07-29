@@ -20,6 +20,18 @@ public static class CatalogEndpoints
             .WithSummary("Get all games")
             .Produces<List<GameResponse>>(StatusCodes.Status200OK);
 
+        // Busca avançada (Fase 4). Público, como uma vitrine de loja deve ser.
+        // Exposto em /api/game/search e também na raiz /search, que é o caminho
+        // citado no enunciado.
+        group.MapGet("/search", async ([FromQuery] string q, [FromQuery] int? size,
+                [FromServices] IGameService gameService, CancellationToken ct) =>
+                await SearchGamesAsync(q, size, gameService, ct))
+            .WithName("SearchGames")
+            .WithSummary("Advanced game search")
+            .WithDescription("Busca no Elasticsearch com tolerância a erros de digitação (fuzziness AUTO) e ordenação por relevância (_score).")
+            .Produces<GameSearchResponse>(StatusCodes.Status200OK)
+            .Produces<ProblemDetails>(StatusCodes.Status400BadRequest);
+
         group.MapPost("", async ([FromBody] CreateGameRequest request, [FromServices] IGameService gameService, CancellationToken ct) =>
                 await CreateGameAsync(request, gameService, ct))
             .WithName("CreateGame")
@@ -60,6 +72,38 @@ public static class CatalogEndpoints
             .WithDescription("Returns games from orders with status Completed.")
             .RequireAuthorization(Policies.RequireUserRole)
             .Produces<List<GameResponse>>(StatusCodes.Status200OK);
+
+        // Alias na raiz, literalmente o "/search" pedido no enunciado.
+        app.MapGet("/search", async ([FromQuery] string q, [FromQuery] int? size,
+                [FromServices] IGameService gameService, CancellationToken ct) =>
+                await SearchGamesAsync(q, size, gameService, ct))
+            .WithName("SearchGamesRoot")
+            .WithSummary("Advanced game search (alias)")
+            .Produces<GameSearchResponse>(StatusCodes.Status200OK);
+    }
+
+    private static async Task<IResult> SearchGamesAsync(
+        string q, int? size, IGameService gameService, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(q))
+        {
+            return Results.BadRequest(new ProblemDetails
+            {
+                Status = StatusCodes.Status400BadRequest,
+                Title = "Validation failed",
+                Detail = "O parâmetro de busca 'q' é obrigatório."
+            });
+        }
+
+        // Teto de 100 para o cliente não conseguir pedir uma página gigante.
+        var pageSize = Math.Clamp(size ?? 20, 1, 100);
+
+        var result = await gameService.SearchGamesAsync(q, pageSize, ct);
+
+        return result.IsError
+            ? Results.Problem(detail: string.Join("; ", result.Errors.Select(e => e.Description)),
+                              statusCode: StatusCodes.Status503ServiceUnavailable)
+            : Results.Ok(result.Value);
     }
 
     private static async Task<IResult> ListGamesAsync(IGameService gameService, CancellationToken ct)

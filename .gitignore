@@ -1,0 +1,27 @@
+# Build
+bin/
+obj/
+out/
+
+# IDE
+.vs/
+.idea/
+*.user
+*.suo
+
+# macOS
+.DS_Store
+
+# Testes
+TestResults/
+*.trx
+coverage*.xml
+
+# Logs
+logs/
+*.log
+
+# Segredos
+.env
+*.env
+.secrets-gerados.txt

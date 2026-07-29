@@ -1,6 +1,8 @@
+using System.Net.Http.Headers;
 using System.Security.Claims;
 using System.Text;
 using Postech.Catalog.Api.Domain.Authorization;
+using Postech.Catalog.Api.Infrastructure.Search;
 using MassTransit;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
@@ -70,6 +72,46 @@ public static class ServiceCollectionExtensions
 
         // Messaging
         services.AddScoped<IEventPublisher, RabbitMqEventPublisher>();
+
+        return services;
+    }
+
+    /// <summary>
+    /// Registra a camada de busca avançada. O HttpClient é tipado e gerenciado pelo
+    /// IHttpClientFactory, o que traz pooling de conexão e evita o esgotamento de
+    /// sockets que acontece ao instanciar HttpClient manualmente.
+    /// </summary>
+    public static IServiceCollection AddSearchEngine(this IServiceCollection services, IConfiguration configuration)
+    {
+        services.Configure<ElasticsearchOptions>(
+            configuration.GetSection(ElasticsearchOptions.SectionName));
+
+        services.AddHttpClient<IGameSearchIndex, ElasticGameSearchIndex>((provider, client) =>
+        {
+            var options = provider
+                .GetRequiredService<Microsoft.Extensions.Options.IOptions<ElasticsearchOptions>>().Value;
+
+            client.BaseAddress = new Uri(options.Uri.TrimEnd('/') + "/");
+            client.Timeout = TimeSpan.FromSeconds(options.TimeoutSeconds);
+
+            // ApiKey tem prioridade; senão, basic auth (Elastic Cloud usa o usuário "elastic").
+            if (!string.IsNullOrWhiteSpace(options.ApiKey))
+            {
+                client.DefaultRequestHeaders.Authorization =
+                    new AuthenticationHeaderValue("ApiKey", options.ApiKey);
+            }
+            else if (!string.IsNullOrWhiteSpace(options.Username))
+            {
+                var credentials = Convert.ToBase64String(
+                    Encoding.UTF8.GetBytes($"{options.Username}:{options.Password}"));
+
+                client.DefaultRequestHeaders.Authorization =
+                    new AuthenticationHeaderValue("Basic", credentials);
+            }
+        });
+
+        // Cria o índice e reindexa o catálogo assim que o pod sobe.
+        services.AddHostedService<SearchIndexInitializer>();
 
         return services;
     }

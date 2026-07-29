@@ -1,0 +1,155 @@
+name: catalog-api
+
+# Todo push na main vira deploy em producao. E o requisito de GitOps da fase:
+# o que esta na main e o que esta rodando no cluster.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+env:
+  SOLUTION: src/Postech.Catalog.Api.sln
+  IMAGE_NAME: catalog-api
+  NAMESPACE: gamestore
+  DEPLOYMENT: catalog-api
+  CONTAINER: catalog-api
+
+jobs:
+  # ---------------------------------------------------------------
+  # 1. Compila e roda os testes unitarios.
+  #    Falhou aqui, nada e publicado e o cluster nao e tocado.
+  # ---------------------------------------------------------------
+  build-test:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # O Postech.Shared vem da pasta ./nupkgs (ver nuget.config), nao do nuget.org
+      - name: Restore
+        run: dotnet restore ${{ env.SOLUTION }}
+
+      - name: Build
+        run: dotnet build ${{ env.SOLUTION }} -c Release --no-restore
+
+      - name: Test
+        run: dotnet test ${{ env.SOLUTION }} -c Release --no-build --verbosity normal --logger "trx;LogFileName=test-results.trx"
+
+      - name: Publicar resultado dos testes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: '**/test-results.trx'
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------
+  # 2. Constroi a imagem, escaneia e envia para o ACR.
+  #    A tag e o SHA curto do commit: cada imagem rastreia ate o codigo.
+  # ---------------------------------------------------------------
+  package:
+    name: Image & push
+    needs: build-test
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Definir tag
+        id: meta
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Login na Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login no ACR
+        run: az acr login --name ${{ vars.ACR_NAME }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      # platforms: linux/amd64 e obrigatorio. Os nos do AKS sao amd64, e uma
+      # imagem arm64 sobe e morre com "exec format error" sem explicar o motivo.
+      - name: Build e push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ vars.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
+            ${{ vars.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Security scan (item "desejavel" do enunciado).
+      # exit-code 0 = reporta mas nao bloqueia. Troque para 1 quando quiser
+      # que vulnerabilidade critica derrube o deploy.
+      - name: Scan de vulnerabilidades
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ vars.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '0'
+
+  # ---------------------------------------------------------------
+  # 3. Atualiza o deployment no AKS e ESPERA o rollout terminar.
+  #    O rollout status e o que transforma "deu push" em "esta no ar":
+  #    se os pods novos nao ficarem prontos, o job falha em vermelho.
+  # ---------------------------------------------------------------
+  deploy:
+    name: Deploy no AKS
+    needs: package
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Login na Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Credenciais do cluster
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ vars.RESOURCE_GROUP }} \
+            --name ${{ vars.AKS_NAME }} \
+            --overwrite-existing
+
+      - name: Rolling update
+        run: |
+          kubectl set image deployment/${{ env.DEPLOYMENT }} \
+            ${{ env.CONTAINER }}=${{ vars.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ needs.package.outputs.tag }} \
+            -n ${{ env.NAMESPACE }}
+
+          kubectl annotate deployment/${{ env.DEPLOYMENT }} -n ${{ env.NAMESPACE }} \
+            kubernetes.io/change-cause="commit ${{ github.sha }} por ${{ github.actor }}" --overwrite
+
+      - name: Aguardar o rollout
+        run: kubectl rollout status deployment/${{ env.DEPLOYMENT }} -n ${{ env.NAMESPACE }} --timeout=300s
+
+      # Se os pods novos nao ficarem prontos, volta para a versao anterior
+      # sozinho. E o que torna seguro fazer deploy ao vivo na gravacao.
+      - name: Rollback automatico em caso de falha
+        if: failure()
+        run: |
+          echo "Rollout falhou. Revertendo."
+          kubectl rollout undo deployment/${{ env.DEPLOYMENT }} -n ${{ env.NAMESPACE }}
+          kubectl rollout status deployment/${{ env.DEPLOYMENT }} -n ${{ env.NAMESPACE }} --timeout=180s
+          exit 1
+
+      - name: Estado final
+        run: |
+          kubectl get pods -n ${{ env.NAMESPACE }} -l app=${{ env.DEPLOYMENT }} -o wide
+          kubectl get deployment/${{ env.DEPLOYMENT }} -n ${{ env.NAMESPACE }}

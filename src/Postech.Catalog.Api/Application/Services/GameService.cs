@@ -6,6 +6,7 @@ using Postech.Catalog.Api.Domain.Entities;
 using Postech.Catalog.Api.Domain.Errors;
 using Postech.Catalog.Api.Infrastructure.Messaging;
 using Postech.Catalog.Api.Infrastructure.Repositories;
+using Postech.Catalog.Api.Infrastructure.Search;
 
 namespace Postech.Catalog.Api.Application.Services;
 
@@ -22,18 +23,36 @@ public class GameService : IGameService
     private readonly IGameRepository _gameRepository;
     private readonly IEventPublisher _eventPublisher;
     private readonly IDistributedCache _cache;
+    private readonly IGameSearchIndex _searchIndex;
     private readonly ILogger<GameService> _logger;
 
     public GameService(
         IGameRepository gameRepository,
         IEventPublisher eventPublisher,
         IDistributedCache cache,
+        IGameSearchIndex searchIndex,
         ILogger<GameService> logger)
     {
         _gameRepository = gameRepository;
         _eventPublisher = eventPublisher;
         _cache = cache;
+        _searchIndex = searchIndex;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Busca avançada delegada ao Elasticsearch — deliberadamente sem passar pelo
+    /// Postgres nem pelo cache, para que o endpoint demonstre o motor de busca puro.
+    /// </summary>
+    public Task<ErrorOr<GameSearchResponse>> SearchGamesAsync(
+        string query, int size = 20, CancellationToken cancellationToken = default)
+        => SearchInternalAsync(query, size, cancellationToken);
+
+    private async Task<ErrorOr<GameSearchResponse>> SearchInternalAsync(
+        string query, int size, CancellationToken cancellationToken)
+    {
+        var result = await _searchIndex.SearchAsync(query, size, cancellationToken);
+        return result;
     }
 
     public async Task<ErrorOr<List<GameResponse>>> GetAllGamesAsync(CancellationToken cancellationToken = default)
@@ -106,6 +125,10 @@ public class GameService : IGameService
         await _gameRepository.AddAsync(game, cancellationToken);
         await InvalidateListCacheAsync(cancellationToken);
 
+        // Sincronização exigida pela Fase 4: todo insert no banco principal
+        // reflete imediatamente no índice do Elasticsearch.
+        await _searchIndex.IndexGameAsync(game, cancellationToken);
+
         return Result.Success;
     }
 
@@ -154,6 +177,9 @@ public class GameService : IGameService
         {
             await _gameRepository.UpdateAsync(game, cancellationToken);
             await InvalidateGameCacheAsync(request.Id, cancellationToken);
+
+            // Reindexa o documento inteiro: o PUT no _doc substitui a versão anterior.
+            await _searchIndex.IndexGameAsync(game, cancellationToken);
         }
 
         return Result.Success;
@@ -171,6 +197,7 @@ public class GameService : IGameService
 
         await _gameRepository.DeleteAsync(id, cancellationToken);
         await InvalidateGameCacheAsync(id, cancellationToken);
+        await _searchIndex.DeleteGameAsync(id, cancellationToken);
 
         return Result.Success;
     }
