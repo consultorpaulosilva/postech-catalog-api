@@ -96,7 +96,7 @@ jobs:
       # exit-code 0 = reporta mas nao bloqueia. Troque para 1 quando quiser
       # que vulnerabilidade critica derrube o deploy.
       - name: Scan de vulnerabilidades
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ vars.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
           format: table
